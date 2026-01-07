@@ -1,0 +1,12 @@
+{
+  "embedding_url": "http://localhost:1234",
+  "embedding_dimensions": 2560,
+  "data_dir": "./data",
+  "port": "8080",
+  "insecure_skip_verify": false,
+  "ca_cert_path": "",
+  "features": {
+    "async_embedding": false,
+    "immediate_embedding": false
+  }
+}
