@@ -16,6 +16,7 @@
 coverage.*
 *.coverprofile
 profile.cov
+GitExtensions.settings
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
