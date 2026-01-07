@@ -34,7 +34,7 @@ END;
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at);
-CREATE INDEX IF NOT EXISTS idx_documents_vectorized ON documents(is_vectorized);
+CREATE INDEX IF NOT EXISTS idx_documents_embedded ON documents(is_embedded);
 
 -- TODO: Add sqlite-vec extension initialization here
 -- SELECT load_extension('vec0');

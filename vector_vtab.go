@@ -306,9 +306,9 @@ func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVect
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_vectorized
+		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
 		FROM "%s"
-		WHERE is_vectorized = 1 AND vector IS NOT NULL
+		WHERE is_embedded = 1 AND vector IS NOT NULL
 	`, tableName)
 
 	rows, err := db.Query(query)
@@ -322,17 +322,17 @@ func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVect
 		var doc Document
 		var metadataJSON string
 		var vectorBytes []byte
-		var isVectorized int
+		var isEmbedded int
 
 		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
-			&doc.CreatedAt, &doc.UpdatedAt, &isVectorized)
+			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded)
 		if err != nil {
 			continue
 		}
 
 		doc.DB = dbId
 		doc.Table = tableName
-		doc.IsVectorized = isVectorized == 1
+		doc.IsEmbedded = isEmbedded == 1
 
 		if metadataJSON != "" {
 			_ = json.Unmarshal([]byte(metadataJSON), &doc.Metadata)

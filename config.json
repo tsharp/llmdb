@@ -6,7 +6,7 @@
   "insecure_skip_verify": false,
   "ca_cert_path": "",
   "features": {
-    "async_embedding": false,
-    "immediate_embedding": false
+    "embedding": true,
+    "embedding_job": true
   }
 }

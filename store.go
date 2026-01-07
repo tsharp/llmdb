@@ -90,7 +90,7 @@ func (s *DocumentStore) ensureTable(db *sql.DB, tableName string) error {
 			vector BLOB,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
-			is_vectorized INTEGER DEFAULT 0
+			is_embedded INTEGER DEFAULT 0
 		);
 	`, tableName)
 
@@ -141,9 +141,9 @@ func (s *DocumentStore) ensureTable(db *sql.DB, tableName string) error {
 	// Create indexes
 	idxCreatedAt := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_created_at" ON "%s"(created_at)`, tableName, tableName)
 	idxUpdatedAt := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_updated_at" ON "%s"(updated_at)`, tableName, tableName)
-	idxVectorized := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_vectorized" ON "%s"(is_vectorized)`, tableName, tableName)
+	idxEmbedded := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_embedded" ON "%s"(is_embedded)`, tableName, tableName)
 
-	for _, idx := range []string{idxCreatedAt, idxUpdatedAt, idxVectorized} {
+	for _, idx := range []string{idxCreatedAt, idxUpdatedAt, idxEmbedded} {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("failed to create index for %s: %w", tableName, err)
 		}
@@ -201,22 +201,22 @@ func (s *DocumentStore) StoreDocument(dbId, tableName string, doc *Document) err
 	var vectorBytes []byte
 	if len(doc.Vector) > 0 {
 		vectorBytes = serializeVector(doc.Vector)
-		doc.IsVectorized = true
+		doc.IsEmbedded = true
 	}
 
 	query := fmt.Sprintf(`
-		INSERT INTO "%s" (id, content, metadata, vector, created_at, updated_at, is_vectorized)
+		INSERT INTO "%s" (id, content, metadata, vector, created_at, updated_at, is_embedded)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			content = excluded.content,
 			metadata = excluded.metadata,
 			vector = excluded.vector,
 			updated_at = excluded.updated_at,
-			is_vectorized = excluded.is_vectorized
+			is_embedded = excluded.is_embedded
 	`, tableName)
 
 	_, err = db.Exec(query, doc.ID, doc.Content, string(metadataJSON),
-		vectorBytes, doc.CreatedAt, doc.UpdatedAt, boolToInt(doc.IsVectorized))
+		vectorBytes, doc.CreatedAt, doc.UpdatedAt, boolToInt(doc.IsEmbedded))
 
 	return err
 }
@@ -229,7 +229,7 @@ func (s *DocumentStore) GetDocument(dbId, tableName, id string) (*Document, erro
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_vectorized
+		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
 		FROM "%s"
 		WHERE id = ?
 	`, tableName)
@@ -237,11 +237,11 @@ func (s *DocumentStore) GetDocument(dbId, tableName, id string) (*Document, erro
 	var doc Document
 	var metadataJSON string
 	var vectorBytes []byte
-	var isVectorized int
+	var isEmbedded int
 
 	err = db.QueryRow(query, id).Scan(
 		&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
-		&doc.CreatedAt, &doc.UpdatedAt, &isVectorized,
+		&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("document not found")
@@ -252,7 +252,7 @@ func (s *DocumentStore) GetDocument(dbId, tableName, id string) (*Document, erro
 
 	doc.DB = dbId
 	doc.Table = tableName
-	doc.IsVectorized = isVectorized == 1
+	doc.IsEmbedded = isEmbedded == 1
 
 	// Deserialize metadata
 	if metadataJSON != "" {
@@ -307,7 +307,7 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 	// FTS5 query with ranking
 	sqlQuery := fmt.Sprintf(`
 		SELECT d.id, d.content, d.metadata, d.vector, d.created_at, d.updated_at, 
-		       d.is_vectorized, bm25(fts) as score
+		       d.is_embedded, bm25(fts) as score
 		FROM "%s_fts" fts
 		JOIN "%s" d ON fts.rowid = d.rowid
 		WHERE fts MATCH ?
@@ -326,18 +326,18 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 		var doc Document
 		var metadataJSON string
 		var vectorBytes []byte
-		var isVectorized int
+		var isEmbedded int
 		var score float64
 
 		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
-			&doc.CreatedAt, &doc.UpdatedAt, &isVectorized, &score)
+			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded, &score)
 		if err != nil {
 			return nil, err
 		}
 
 		doc.DB = dbId
 		doc.Table = tableName
-		doc.IsVectorized = isVectorized == 1
+		doc.IsEmbedded = isEmbedded != 0
 
 		if metadataJSON != "" {
 			json.Unmarshal([]byte(metadataJSON), &doc.Metadata)
@@ -412,7 +412,7 @@ func (s *DocumentStore) ListDocuments(dbId, tableName string, limit, offset int)
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_vectorized
+		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
 		FROM "%s"
 		ORDER BY created_at DESC
 		LIMIT ? OFFSET ?
@@ -429,17 +429,17 @@ func (s *DocumentStore) ListDocuments(dbId, tableName string, limit, offset int)
 		var doc Document
 		var metadataJSON string
 		var vectorBytes []byte
-		var isVectorized int
+		var isEmbedded int
 
 		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
-			&doc.CreatedAt, &doc.UpdatedAt, &isVectorized)
+			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded)
 		if err != nil {
 			return nil, err
 		}
 
 		doc.DB = dbId
 		doc.Table = tableName
-		doc.IsVectorized = isVectorized == 1
+		doc.IsEmbedded = isEmbedded == 1
 
 		if metadataJSON != "" {
 			json.Unmarshal([]byte(metadataJSON), &doc.Metadata)
@@ -495,7 +495,7 @@ func (s *DocumentStore) getDBInfo(dbId string) (DBInfo, error) {
 	`
 
 	var firstCreated, lastUpdated sql.NullString
-	err = db.QueryRow(query).Scan(&info.DocumentCount, &info.VectorizedCount, &firstCreated, &lastUpdated)
+	err = db.QueryRow(query).Scan(&info.DocumentCount, &info.EmbeddedCount, &firstCreated, &lastUpdated)
 	if err != nil {
 		return info, err
 	}
@@ -521,24 +521,24 @@ func (s *DocumentStore) getDBInfo(dbId string) (DBInfo, error) {
 	return info, nil
 }
 
-// GetNonVectorizedDocuments returns documents that need vectorization from a database table
-func (s *DocumentStore) GetNonVectorizedDocuments(dbId, tableName string, limit int) ([]*Document, error) {
+// GetNonEmbeddedDocuments returns documents that need embedding from a database table
+func (s *DocumentStore) GetNonEmbeddedDocuments(dbId, tableName string, limit int) ([]*Document, error) {
 	db, err := s.getDB(dbId)
 	if err != nil {
 		return nil, err
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_vectorized
+		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
 		FROM "%s"
-		WHERE is_vectorized = 0
+		WHERE is_embedded = 0
 		ORDER BY created_at ASC
 		LIMIT ?
 	`, tableName)
 
 	rows, err := db.Query(query, limit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query non-vectorized documents: %w", err)
+		return nil, fmt.Errorf("failed to query non-embedded documents: %w", err)
 	}
 	defer rows.Close()
 
@@ -547,11 +547,11 @@ func (s *DocumentStore) GetNonVectorizedDocuments(dbId, tableName string, limit 
 		var doc Document
 		var metadataJSON string
 		var vectorBytes []byte
-		var isVectorized int
+		var isEmbedded int
 
 		err := rows.Scan(
 			&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
-			&doc.CreatedAt, &doc.UpdatedAt, &isVectorized,
+			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan document: %w", err)
@@ -559,7 +559,7 @@ func (s *DocumentStore) GetNonVectorizedDocuments(dbId, tableName string, limit 
 
 		doc.DB = dbId
 		doc.Table = tableName
-		doc.IsVectorized = isVectorized != 0
+		doc.IsEmbedded = isEmbedded != 0
 
 		// Deserialize metadata
 		if metadataJSON != "" {
@@ -590,7 +590,7 @@ func (s *DocumentStore) UpdateDocumentVector(dbId, tableName, docID string, vect
 
 	query := fmt.Sprintf(`
 		UPDATE "%s"
-		SET vector = ?, is_vectorized = 1, updated_at = ?
+		SET vector = ?, is_embedded = 1, updated_at = ?
 		WHERE id = ?
 	`, tableName)
 

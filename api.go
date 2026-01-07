@@ -15,17 +15,50 @@ const (
 	ClientFeatures = "X-Client-Features"
 )
 
+// parseClientFeatures parses the X-Client-Features header format:
+// "feature1=value; feature2=value; feature3; ..."
+// Returns a map of feature names to values (empty string if no value provided)
+func parseClientFeatures(header string) map[string]string {
+	features := make(map[string]string)
+	if header == "" {
+		return features
+	}
+
+	// Split by semicolon
+	parts := strings.Split(header, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// Check if feature has a value
+		if idx := strings.Index(part, "="); idx != -1 {
+			key := strings.TrimSpace(part[:idx])
+			value := strings.TrimSpace(part[idx+1:])
+			features[key] = value
+		} else {
+			// Feature present without value
+			features[part] = ""
+		}
+	}
+
+	return features
+}
+
 // API handles HTTP requests
 type API struct {
 	store    *DocumentStore
 	embedder Embedder
+	config   *Config
 }
 
 // NewAPI creates a new API instance
-func NewAPI(store *DocumentStore, embedder Embedder) *API {
+func NewAPI(store *DocumentStore, embedder Embedder, config *Config) *API {
 	return &API{
 		store:    store,
 		embedder: embedder,
+		config:   config,
 	}
 }
 
@@ -63,21 +96,32 @@ func (a *API) StoreDocument(w http.ResponseWriter, r *http.Request) {
 		Metadata: req.Metadata,
 	}
 
-	// Check if immediate vectorization is requested
-	shouldEmbed := r.Header.Get(ClientFeatures) == "true"
-	if shouldEmbed {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
+	// Check if immediate (sync) embedding is requested
+	// Config features take precedence - header can't override disabled features
+	embeddingEnabled := a.config.Features["embedding"]
+	if embeddingEnabled {
+		// Sync embedding is enabled in config, check client preference
+		clientFeatures := parseClientFeatures(r.Header.Get(ClientFeatures))
+		clientEmbedValue, clientRequestsEmbed := clientFeatures["embed"]
 
-		vector, err := a.embedder.Embed(ctx, req.Content)
-		if err != nil {
-			a.errorResponse(w, http.StatusInternalServerError,
-				fmt.Sprintf("vectorization failed: %v", err))
-			return
+		// Sync embed if client requests it (or doesn't specify async)
+		shouldEmbed := !clientRequestsEmbed || clientEmbedValue == "" || clientEmbedValue == "sync"
+
+		if shouldEmbed {
+			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			defer cancel()
+
+			vector, err := a.embedder.Embed(ctx, req.Content)
+			if err != nil {
+				a.errorResponse(w, http.StatusInternalServerError,
+					fmt.Sprintf("embedding failed: %v", err))
+				return
+			}
+			doc.Vector = vector
+			doc.IsEmbedded = true
 		}
-		doc.Vector = vector
-		doc.IsVectorized = true
 	}
+	// Non-embedded documents will be picked up by background worker if embedding_job is enabled
 
 	if err := a.store.StoreDocument(dbName, tableName, doc); err != nil {
 		a.errorResponse(w, http.StatusInternalServerError,
@@ -85,17 +129,15 @@ func (a *API) StoreDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Non-vectorized documents will be picked up by the background worker
-
 	// Return minimal response by default
 	schema := r.URL.Query().Get("schema")
 	if schema != "full" {
 		w.Header().Set("X-Schema", "minimal")
 		minimalResp := map[string]interface{}{
-			"id":            doc.ID,
-			"created_at":    doc.CreatedAt,
-			"updated_at":    doc.UpdatedAt,
-			"is_vectorized": doc.IsVectorized,
+			"id":          doc.ID,
+			"created_at":  doc.CreatedAt,
+			"updated_at":  doc.UpdatedAt,
+			"is_embedded": doc.IsEmbedded,
 		}
 		a.jsonResponse(w, http.StatusCreated, minimalResp)
 		return
@@ -190,7 +232,7 @@ func (a *API) SearchDocuments(w http.ResponseWriter, r *http.Request) {
 		queryVector, err := a.embedder.Embed(ctx, req.Query)
 		if err != nil {
 			a.errorResponse(w, http.StatusInternalServerError,
-				fmt.Sprintf("failed to vectorize query: %v", err))
+				fmt.Sprintf("failed to embed query: %v", err))
 			return
 		}
 
@@ -292,19 +334,19 @@ func (a *API) ListDocuments(w http.ResponseWriter, r *http.Request) {
 	// Return minimal response by default (just IDs and metadata)
 	if !fullSchema {
 		type MinimalDoc struct {
-			ID           string    `json:"id"`
-			CreatedAt    time.Time `json:"created_at"`
-			UpdatedAt    time.Time `json:"updated_at"`
-			IsVectorized bool      `json:"is_vectorized"`
+			ID         string    `json:"id"`
+			CreatedAt  time.Time `json:"created_at"`
+			UpdatedAt  time.Time `json:"updated_at"`
+			IsEmbedded bool      `json:"is_embedded"`
 		}
 
 		minimalDocs := make([]MinimalDoc, len(documents))
 		for i, doc := range documents {
 			minimalDocs[i] = MinimalDoc{
-				ID:           doc.ID,
-				CreatedAt:    doc.CreatedAt,
-				UpdatedAt:    doc.UpdatedAt,
-				IsVectorized: doc.IsVectorized,
+				ID:         doc.ID,
+				CreatedAt:  doc.CreatedAt,
+				UpdatedAt:  doc.UpdatedAt,
+				IsEmbedded: doc.IsEmbedded,
 			}
 		}
 
@@ -368,32 +410,32 @@ func (a *API) errorResponse(w http.ResponseWriter, status int, message string) {
 	})
 }
 
-// Background vectorization queue (stub)
+// Background embedding queue (stub)
 // TODO: Implement background job processing
 // Options:
 // 1. In-memory queue with worker goroutines
 // 2. Redis queue with worker processes
 // 3. Database-backed queue (polling)
 //
-// func (a *API) queueVectorization(partition, docID string) error {
+// func (a *API) queueEmbedding(partition, docID string) error {
 //     // Add to queue for background processing
 //     return nil
 // }
 //
 // func (a *API) startBackgroundWorkers(ctx context.Context, numWorkers int) {
 //     for i := 0; i < numWorkers; i++ {
-//         go a.vectorizationWorker(ctx, i)
+//         go a.embeddingWorker(ctx, i)
 //     }
 // }
 //
-// func (a *API) vectorizationWorker(ctx context.Context, id int) {
+// func (a *API) embeddingWorker(ctx context.Context, id int) {
 //     for {
 //         select {
 //         case <-ctx.Done():
 //             return
 //         default:
 //             // Fetch next document from queue
-//             // Vectorize it
+//             // Embed it
 //             // Update in store
 //         }
 //     }

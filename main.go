@@ -17,12 +17,13 @@ import (
 
 // Config holds application configuration
 type Config struct {
-	EmbeddingURL        string `json:"embedding_url"`
-	EmbeddingDimensions int    `json:"embedding_dimensions"`
-	DataDir             string `json:"data_dir"`
-	Port                string `json:"port"`
-	InsecureSkipVerify  bool   `json:"insecure_skip_verify"` // Skip TLS certificate verification
-	CACertPath          string `json:"ca_cert_path"`         // Path to custom CA certificate
+	EmbeddingURL        string          `json:"embedding_url"`
+	EmbeddingDimensions int             `json:"embedding_dimensions"`
+	DataDir             string          `json:"data_dir"`
+	Port                string          `json:"port"`
+	InsecureSkipVerify  bool            `json:"insecure_skip_verify"` // Skip TLS certificate verification
+	CACertPath          string          `json:"ca_cert_path"`         // Path to custom CA certificate
+	Features            map[string]bool `json:"features"`             // Enabled features (true/false)
 }
 
 // loadConfig loads configuration from file with environment variable overrides
@@ -98,15 +99,15 @@ func main() {
 		}
 	} else {
 		embedder = NewStubEmbedder()
-		log.Printf("Using stub embedder (no actual vectorization)")
+		log.Printf("Using stub embedder (no actual embedding)")
 	}
 
 	// Create API
-	api := NewAPI(store, embedder)
+	api := NewAPI(store, embedder, config)
 
-	// Start background vectorization worker
+	// Start background embedding worker
 	stopWorker := make(chan struct{})
-	go startVectorizationWorker(store, embedder, stopWorker)
+	go startEmbeddingWorker(store, embedder, stopWorker)
 
 	// Setup router
 	r := mux.NewRouter()
@@ -142,7 +143,7 @@ func main() {
 	fmt.Printf("  POST   /db/{dbName}/{tableName}/search\n")
 	fmt.Printf("  GET    /db/{dbName}/{tableName}/{docId}\n")
 	fmt.Printf("  DELETE /db/{dbName}/{tableName}/{docId}\n")
-	fmt.Printf("\nUse X-Vectorize: true header to trigger immediate vectorization\n")
+	fmt.Printf("\nUse X-Client-Features: embed=sync header to trigger immediate embedding\n")
 
 	// Graceful shutdown
 	go func() {
@@ -171,7 +172,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Vectorize")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Client-Features")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -191,37 +192,36 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// startVectorizationWorker polls for non-vectorized documents and processes them
-func startVectorizationWorker(store *DocumentStore, embedder Embedder, stop chan struct{}) {
+// startEmbeddingWorker polls for non-embedded documents and processes them
+func startEmbeddingWorker(store *DocumentStore, embedder Embedder, stop chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	log.Println("Background vectorization worker started")
+	log.Println("Background embedding worker started")
 
 	for {
 		select {
 		case <-stop:
-			log.Println("Background vectorization worker stopped")
+			log.Println("Background embedding worker stopped")
 			return
 		case <-ticker.C:
-			processNonVectorizedDocuments(store, embedder)
+			processNonEmbeddedDocuments(store, embedder)
 		}
 	}
 }
 
-// processNonVectorizedDocuments finds and vectorizes documents across all databases and tables
-func processNonVectorizedDocuments(store *DocumentStore, embedder Embedder) {
-	log.Println("Vectorization worker: checking for non-vectorized documents...")
+// processNonEmbeddedDocuments finds and embeds documents across all databases and tables
+func processNonEmbeddedDocuments(store *DocumentStore, embedder Embedder) {
+	log.Println("Embedding worker: checking for non-embedded documents...")
 
 	// Get all databases
 	databases, err := store.ListDatabases()
 	if err != nil {
-		log.Printf("Error listing databases for vectorization: %v", err)
+		log.Printf("Error listing databases for embedding: %v", err)
 		return
 	}
 
-	log.Printf("Vectorization worker: found %d databases to check", len(databases))
-
+	log.Printf("Embedding worker: found %d databases to check", len(databases))
 	totalProcessed := 0
 	maxDocuments := 15 // Process up to 15 documents total per cycle
 
@@ -237,7 +237,7 @@ func processNonVectorizedDocuments(store *DocumentStore, embedder Embedder) {
 			continue
 		}
 
-		log.Printf("Vectorization worker: found %d tables in database '%s'", len(tables), db.Name)
+		log.Printf("Embedding worker: found %d tables in database '%s'", len(tables), db.Name)
 
 		// Process each table
 		for _, tableName := range tables {
@@ -248,22 +248,22 @@ func processNonVectorizedDocuments(store *DocumentStore, embedder Embedder) {
 			// Calculate remaining capacity
 			remaining := maxDocuments - totalProcessed
 
-			log.Printf("Vectorization worker: checking table '%s.%s' for up to %d documents", db.Name, tableName, remaining)
+			log.Printf("Embedding worker: checking table '%s.%s' for up to %d documents", db.Name, tableName, remaining)
 
-			// Get non-vectorized documents from this table
-			docs, err := store.GetNonVectorizedDocuments(db.Name, tableName, remaining)
+			// Get non-embedded documents from this table
+			docs, err := store.GetNonEmbeddedDocuments(db.Name, tableName, remaining)
 			if err != nil {
-				log.Printf("Error getting non-vectorized documents from %s.%s: %v", db.Name, tableName, err)
+				log.Printf("Error getting non-embedded documents from %s.%s: %v", db.Name, tableName, err)
 				continue
 			}
 
-			log.Printf("Vectorization worker: found %d non-vectorized documents in table '%s.%s'", len(docs), db.Name, tableName)
+			log.Printf("Embedding worker: found %d non-embedded documents in table '%s.%s'", len(docs), db.Name, tableName)
 
 			if len(docs) == 0 {
 				continue
 			}
 
-			log.Printf("Processing %d non-vectorized documents from table '%s.%s'", len(docs), db.Name, tableName)
+			log.Printf("Processing %d non-embedded documents from table '%s.%s'", len(docs), db.Name, tableName)
 
 			for _, doc := range docs {
 				// Create context with timeout for each document
@@ -273,7 +273,7 @@ func processNonVectorizedDocuments(store *DocumentStore, embedder Embedder) {
 				cancel() // Clean up context immediately
 
 				if err != nil {
-					log.Printf("Failed to vectorize document %s in table %s.%s: %v", doc.ID, db.Name, tableName, err)
+					log.Printf("Failed to embed document %s in table %s.%s: %v", doc.ID, db.Name, tableName, err)
 					continue
 				}
 
@@ -289,8 +289,8 @@ func processNonVectorizedDocuments(store *DocumentStore, embedder Embedder) {
 	}
 
 	if totalProcessed > 0 {
-		log.Printf("Background vectorization: processed %d documents", totalProcessed)
+		log.Printf("Background embedding: processed %d documents", totalProcessed)
 	} else {
-		log.Println("Vectorization worker: no documents to process")
+		log.Println("Embedding worker: no documents to process")
 	}
 }

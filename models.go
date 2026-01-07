@@ -4,15 +4,15 @@ import "time"
 
 // Document represents a stored document with metadata
 type Document struct {
-	ID           string                 `json:"id"`
-	DB           string                 `json:"db"`
-	Table        string                 `json:"table"`
-	Content      string                 `json:"content"` // Markdown text
-	Metadata     map[string]interface{} `json:"metadata"`
-	Vector       []float32              `json:"vector,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
-	IsVectorized bool                   `json:"is_vectorized"`
+	ID         string                 `json:"id"`
+	DB         string                 `json:"db"`
+	Table      string                 `json:"table"`
+	Content    string                 `json:"content"` // Markdown text
+	Metadata   map[string]interface{} `json:"metadata"`
+	Vector     []float32              `json:"vector,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+	UpdatedAt  time.Time              `json:"updated_at"`
+	IsEmbedded bool                   `json:"is_embedded"`
 }
 
 // StoreDocumentRequest represents the request to store a document
@@ -57,12 +57,12 @@ type SearchResponse struct {
 
 // DBInfo represents information about a database
 type DBInfo struct {
-	Name            string    `json:"name"`
-	DocumentCount   int       `json:"document_count"`
-	VectorizedCount int       `json:"vectorized_count"`
-	CreatedAt       time.Time `json:"created_at"`
-	LastUpdated     time.Time `json:"last_updated"`
-	SizeBytes       int64     `json:"size_bytes"`
+	Name          string    `json:"name"`
+	DocumentCount int       `json:"document_count"`
+	EmbeddedCount int       `json:"embedded_count"`
+	CreatedAt     time.Time `json:"created_at"`
+	LastUpdated   time.Time `json:"last_updated"`
+	SizeBytes     int64     `json:"size_bytes"`
 }
 
 // ErrorResponse represents an API error response
