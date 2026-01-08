@@ -6,6 +6,8 @@ name: Build
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main" ]
 
@@ -26,3 +28,76 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24'
+
+    - name: Install Nerdbank.GitVersioning
+      run: dotnet tool install --global nbgv
+
+    - name: Set version
+      id: nbgv
+      run: |
+        $version = nbgv get-version -v Version
+        $semver = nbgv get-version -v SemVer2
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "SEMVER=$semver" >> $env:GITHUB_OUTPUT
+
+    - name: Build Windows executable
+      run: go build -v -ldflags="-X 'main.Version=${{ steps.nbgv.outputs.SEMVER }}'" -o llmdb.exe .
+
+    - name: Upload Windows artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: llmdb-windows-amd64
+        path: llmdb.exe
+        retention-days: 30
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build, build-windows]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24'
+
+    - name: Install Nerdbank.GitVersioning
+      run: dotnet tool install --global nbgv
+
+    - name: Set version
+      id: nbgv
+      run: |
+        $version = nbgv get-version -v Version
+        $semver = nbgv get-version -v SemVer2
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "SEMVER=$semver" >> $env:GITHUB_OUTPUT
+
+    - name: Build Windows executable
+      run: go build -v -ldflags="-X 'main.Version=${{ steps.nbgv.outputs.SEMVER }}'" -o llmdb-windows-amd64.exe .
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: llmdb-windows-amd64.exe
+        generate_release_notes: true
+        draft: false
+        prerelease: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

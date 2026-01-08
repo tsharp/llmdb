@@ -15,6 +15,9 @@ import (
 	"github.com/gorilla/mux"
 )
 
+// Version is set via ldflags during build
+var Version = "dev"
+
 // Config holds application configuration
 type Config struct {
 	EmbeddingURL        string          `json:"embedding_url"`
@@ -73,6 +76,9 @@ func loadConfig(configPath string) (*Config, error) {
 
 // main is the entry point for the Context Pipeline API service
 func main() {
+	// Print version information
+	log.Printf("LLMDB version %s", Version)
+
 	// Load configuration
 	config, err := loadConfig("config.json")
 	if err != nil {

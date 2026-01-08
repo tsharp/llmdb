@@ -457,7 +457,8 @@ func (a *API) Health(w http.ResponseWriter, r *http.Request) {
 	a.jsonResponse(w, http.StatusOK, map[string]interface{}{
 		"status":    "healthy",
 		"timestamp": time.Now().UTC(),
-		"service":   "context-pipeline",
+		"service":   "llmdb",
+		"version":   Version,
 	})
 }
 
