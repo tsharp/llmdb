@@ -87,6 +87,7 @@ func (s *DocumentStore) ensureTable(db *sql.DB, tableName string) error {
 			id TEXT PRIMARY KEY,
 			content TEXT NOT NULL,
 			metadata TEXT,
+			tags TEXT,
 			vector BLOB,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL,
@@ -142,8 +143,9 @@ func (s *DocumentStore) ensureTable(db *sql.DB, tableName string) error {
 	idxCreatedAt := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_created_at" ON "%s"(created_at)`, tableName, tableName)
 	idxUpdatedAt := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_updated_at" ON "%s"(updated_at)`, tableName, tableName)
 	idxEmbedded := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_embedded" ON "%s"(is_embedded)`, tableName, tableName)
+	idxTags := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS "idx_%s_tags" ON "%s"(tags)`, tableName, tableName)
 
-	for _, idx := range []string{idxCreatedAt, idxUpdatedAt, idxEmbedded} {
+	for _, idx := range []string{idxCreatedAt, idxUpdatedAt, idxEmbedded, idxTags} {
 		if _, err := db.Exec(idx); err != nil {
 			return fmt.Errorf("failed to create index for %s: %w", tableName, err)
 		}
@@ -197,6 +199,9 @@ func (s *DocumentStore) StoreDocument(dbId, tableName string, doc *Document) err
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	// Serialize tags as comma-separated string
+	tagsStr := strings.Join(doc.Tags, ",")
+
 	// Serialize vector if present
 	var vectorBytes []byte
 	if len(doc.Vector) > 0 {
@@ -205,18 +210,19 @@ func (s *DocumentStore) StoreDocument(dbId, tableName string, doc *Document) err
 	}
 
 	query := fmt.Sprintf(`
-		INSERT INTO "%s" (id, content, metadata, vector, created_at, updated_at, is_embedded)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO "%s" (id, content, metadata, tags, vector, created_at, updated_at, is_embedded)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			content = excluded.content,
 			metadata = excluded.metadata,
+			tags = excluded.tags,
 			vector = excluded.vector,
 			updated_at = excluded.updated_at,
 			is_embedded = excluded.is_embedded
 	`, tableName)
 
 	_, err = db.Exec(query, doc.ID, doc.Content, string(metadataJSON),
-		vectorBytes, doc.CreatedAt, doc.UpdatedAt, boolToInt(doc.IsEmbedded))
+		tagsStr, vectorBytes, doc.CreatedAt, doc.UpdatedAt, boolToInt(doc.IsEmbedded))
 
 	return err
 }
@@ -229,18 +235,19 @@ func (s *DocumentStore) GetDocument(dbId, tableName, id string) (*Document, erro
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
+		SELECT id, content, metadata, tags, vector, created_at, updated_at, is_embedded
 		FROM "%s"
 		WHERE id = ?
 	`, tableName)
 
 	var doc Document
 	var metadataJSON string
+	var tagsStr string
 	var vectorBytes []byte
 	var isEmbedded int
 
 	err = db.QueryRow(query, id).Scan(
-		&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
+		&doc.ID, &doc.Content, &metadataJSON, &tagsStr, &vectorBytes,
 		&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded,
 	)
 	if err == sql.ErrNoRows {
@@ -259,6 +266,11 @@ func (s *DocumentStore) GetDocument(dbId, tableName, id string) (*Document, erro
 		if err := json.Unmarshal([]byte(metadataJSON), &doc.Metadata); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 		}
+	}
+
+	// Deserialize tags
+	if tagsStr != "" {
+		doc.Tags = strings.Split(tagsStr, ",")
 	}
 
 	// Deserialize vector
@@ -294,7 +306,7 @@ func (s *DocumentStore) DeleteDocument(dbId, tableName, id string) error {
 }
 
 // SearchFullText performs full-text search on documents
-func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int) ([]SearchResult, error) {
+func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int, filters map[string]interface{}) ([]SearchResult, error) {
 	db, err := s.getDB(dbId)
 	if err != nil {
 		return nil, err
@@ -304,18 +316,26 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 		limit = 10
 	}
 
+	// Build filter clause
+	filterClause, filterArgs := buildFilterClause(filters, "d")
+
 	// FTS5 query with ranking
 	sqlQuery := fmt.Sprintf(`
-		SELECT d.id, d.content, d.metadata, d.vector, d.created_at, d.updated_at, 
-		       d.is_embedded, bm25(fts) as score
-		FROM "%s_fts" fts
-		JOIN "%s" d ON fts.rowid = d.rowid
-		WHERE fts MATCH ?
+		SELECT d.id, d.content, d.metadata, d.tags, d.vector, d.created_at, d.updated_at, 
+		       d.is_embedded, bm25("%s_fts") as score
+		FROM "%s_fts"
+		JOIN "%s" d ON "%s_fts".rowid = d.rowid
+		WHERE "%s_fts" MATCH ?%s
 		ORDER BY score
 		LIMIT ?
-	`, tableName, tableName)
+	`, tableName, tableName, tableName, tableName, tableName, filterClause)
 
-	rows, err := db.Query(sqlQuery, query, limit)
+	// Prepare arguments: query, filter args, limit
+	queryArgs := []interface{}{query}
+	queryArgs = append(queryArgs, filterArgs...)
+	queryArgs = append(queryArgs, limit)
+
+	rows, err := db.Query(sqlQuery, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("full-text search failed: %w", err)
 	}
@@ -325,11 +345,12 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 	for rows.Next() {
 		var doc Document
 		var metadataJSON string
+		var tagsStr string
 		var vectorBytes []byte
 		var isEmbedded int
 		var score float64
 
-		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
+		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &tagsStr, &vectorBytes,
 			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded, &score)
 		if err != nil {
 			return nil, err
@@ -341,6 +362,9 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 
 		if metadataJSON != "" {
 			json.Unmarshal([]byte(metadataJSON), &doc.Metadata)
+		}
+		if tagsStr != "" {
+			doc.Tags = strings.Split(tagsStr, ",")
 		}
 		if len(vectorBytes) > 0 {
 			doc.Vector = deserializeVector(vectorBytes)
@@ -356,8 +380,8 @@ func (s *DocumentStore) SearchFullText(dbId, tableName, query string, limit int)
 }
 
 // SearchVector performs vector similarity search
-func (s *DocumentStore) SearchVector(dbId, tableName string, queryVector []float32, limit int) ([]SearchResult, error) {
-	return s.searchVectorSimilarity(dbId, tableName, queryVector, limit, "cosine")
+func (s *DocumentStore) SearchVector(dbId, tableName string, queryVector []float32, limit int, filters map[string]interface{}) ([]SearchResult, error) {
+	return s.searchVectorSimilarity(dbId, tableName, queryVector, limit, "cosine", filters)
 }
 
 // ListPartitions returns information about all databases (deprecated, use ListDatabases)
@@ -529,7 +553,7 @@ func (s *DocumentStore) GetNonEmbeddedDocuments(dbId, tableName string, limit in
 	}
 
 	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
+		SELECT id, content, metadata, tags, vector, created_at, updated_at, is_embedded
 		FROM "%s"
 		WHERE is_embedded = 0
 		ORDER BY created_at ASC
@@ -546,11 +570,12 @@ func (s *DocumentStore) GetNonEmbeddedDocuments(dbId, tableName string, limit in
 	for rows.Next() {
 		var doc Document
 		var metadataJSON string
+		var tagsStr string
 		var vectorBytes []byte
 		var isEmbedded int
 
 		err := rows.Scan(
-			&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
+			&doc.ID, &doc.Content, &metadataJSON, &tagsStr, &vectorBytes,
 			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded,
 		)
 		if err != nil {
@@ -566,6 +591,11 @@ func (s *DocumentStore) GetNonEmbeddedDocuments(dbId, tableName string, limit in
 			if err := json.Unmarshal([]byte(metadataJSON), &doc.Metadata); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 			}
+		}
+
+		// Deserialize tags
+		if tagsStr != "" {
+			doc.Tags = strings.Split(tagsStr, ",")
 		}
 
 		// Deserialize vector if present
@@ -654,6 +684,99 @@ func (s *DocumentStore) Close() error {
 }
 
 // Helper functions
+
+// buildFilterClause builds a WHERE clause from filters
+// Supports:
+// - "tags": []string or string - filters by tags (AND logic for multiple tags)
+// - "tag": string - filters by single tag
+// - metadata fields: filters JSON metadata fields
+// tableAlias: optional table alias prefix (e.g., "d" for "d.tags")
+// Returns the WHERE clause SQL and the arguments for the query
+func buildFilterClause(filters map[string]interface{}, tableAlias string) (string, []interface{}) {
+	if len(filters) == 0 {
+		return "", nil
+	}
+
+	var conditions []string
+	var args []interface{}
+
+	// Add table alias prefix if provided
+	prefix := ""
+	if tableAlias != "" {
+		prefix = tableAlias + "."
+	}
+
+	for key, value := range filters {
+		switch key {
+		case "tags":
+			// Handle tags filter - value can be string or []string
+			var tagList []string
+			switch v := value.(type) {
+			case string:
+				tagList = []string{v}
+			case []interface{}:
+				for _, t := range v {
+					if str, ok := t.(string); ok {
+						tagList = append(tagList, str)
+					}
+				}
+			case []string:
+				tagList = v
+			}
+
+			// For each tag, check if it's present in the comma-separated tags field
+			for _, tag := range tagList {
+				// Match: exact tag, or tag at start, or tag in middle/end
+				conditions = append(conditions, fmt.Sprintf("(%stags = ? OR %stags LIKE ? OR %stags LIKE ? OR %stags LIKE ?)", prefix, prefix, prefix, prefix))
+				args = append(args, tag, tag+",%", "%,"+tag+",%", "%,"+tag)
+			}
+
+		case "tag":
+			// Single tag filter
+			if tagStr, ok := value.(string); ok {
+				conditions = append(conditions, fmt.Sprintf("(%stags = ? OR %stags LIKE ? OR %stags LIKE ? OR %stags LIKE ?)", prefix, prefix, prefix, prefix))
+				args = append(args, tagStr, tagStr+",%", "%,"+tagStr+",%", "%,"+tagStr)
+			}
+
+		default:
+			// Metadata field filter using JSON extraction
+			// SQLite JSON syntax: json_extract(metadata, '$.field')
+			conditions = append(conditions, fmt.Sprintf("json_extract(%smetadata, '$.%s') = ?", prefix, key))
+
+			// SQLite json_extract returns values in their JSON types
+			// For comparison, we need to use the actual value, not stringified
+			switch v := value.(type) {
+			case string:
+				// For strings, json_extract returns them without quotes
+				args = append(args, v)
+			case int, int64, float64, float32:
+				// For numbers, json_extract returns numeric values
+				args = append(args, v)
+			case bool:
+				// For booleans, json_extract returns 0 or 1
+				if v {
+					args = append(args, 1)
+				} else {
+					args = append(args, 0)
+				}
+			default:
+				// For other types, marshal to JSON and remove outer quotes if string
+				jsonValue, _ := json.Marshal(value)
+				valueStr := string(jsonValue)
+				if len(valueStr) > 2 && valueStr[0] == '"' && valueStr[len(valueStr)-1] == '"' {
+					valueStr = valueStr[1 : len(valueStr)-1]
+				}
+				args = append(args, valueStr)
+			}
+		}
+	}
+
+	if len(conditions) == 0 {
+		return "", nil
+	}
+
+	return " AND " + strings.Join(conditions, " AND "), args
+}
 
 func serializeVector(vector []float32) []byte {
 	bytes := make([]byte, len(vector)*4)

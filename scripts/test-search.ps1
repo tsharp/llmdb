@@ -1,7 +1,8 @@
 # Test search functionality for Context Pipeline API
 
-$baseUrl = "http://192.168.91.57:8080"
+$baseUrl = "http://localhost:8080"
 $dbId = "products"
+$tableName = "items"  # Add table name
 
 # Full-text search
 Write-Host "=== Full-Text Search ===" -ForegroundColor Cyan
@@ -11,7 +12,7 @@ $searchRequest = @{
     limit = 100
 } | ConvertTo-Json
 
-$response = Invoke-RestMethod -Uri "$baseUrl/db/$dbId/search" `
+$response = Invoke-RestMethod -Uri "$baseUrl/db/$dbId/$tableName/search" `
     -Method POST `
     -ContentType "application/json" `
     -Body $searchRequest
@@ -32,7 +33,7 @@ $vectorSearchRequest = @{
 } | ConvertTo-Json
 
 try {
-    $vectorResponse = Invoke-RestMethod -Uri "$baseUrl/db/$dbId/search" `
+    $vectorResponse = Invoke-RestMethod -Uri "$baseUrl/db/$dbId/$tableName/search" `
         -Method POST `
         -ContentType "application/json" `
         -Body $vectorSearchRequest

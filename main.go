@@ -107,7 +107,11 @@ func main() {
 
 	// Start background embedding worker
 	stopWorker := make(chan struct{})
-	go startEmbeddingWorker(store, embedder, stopWorker)
+	if enabled, ok := config.Features["embedding_job"]; ok && enabled {
+		go startEmbeddingWorker(store, embedder, stopWorker)
+	} else {
+		log.Println("Background embedding worker is disabled by configuration")
+	}
 
 	// Setup router
 	r := mux.NewRouter()

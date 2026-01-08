@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS documents (
 	id TEXT PRIMARY KEY,
 	content TEXT NOT NULL,
 	metadata TEXT, -- JSON
+	tags TEXT, -- Comma-separated tags for filtering
 	vector BLOB, -- Serialized float32 array
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
@@ -35,6 +36,7 @@ END;
 CREATE INDEX IF NOT EXISTS idx_documents_created_at ON documents(created_at);
 CREATE INDEX IF NOT EXISTS idx_documents_updated_at ON documents(updated_at);
 CREATE INDEX IF NOT EXISTS idx_documents_embedded ON documents(is_embedded);
+CREATE INDEX IF NOT EXISTS idx_documents_tags ON documents(tags);
 
 -- TODO: Add sqlite-vec extension initialization here
 -- SELECT load_extension('vec0');

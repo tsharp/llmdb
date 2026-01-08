@@ -9,6 +9,7 @@ type Document struct {
 	Table      string                 `json:"table"`
 	Content    string                 `json:"content"` // Markdown text
 	Metadata   map[string]interface{} `json:"metadata"`
+	Tags       []string               `json:"tags,omitempty"`
 	Vector     []float32              `json:"vector,omitempty"`
 	CreatedAt  time.Time              `json:"created_at"`
 	UpdatedAt  time.Time              `json:"updated_at"`
@@ -20,6 +21,7 @@ type StoreDocumentRequest struct {
 	ID       string                 `json:"id"` // Optional, generated if not provided
 	Content  string                 `json:"content"`
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	Tags     []string               `json:"tags,omitempty"`
 }
 
 // SearchRequest represents a search query

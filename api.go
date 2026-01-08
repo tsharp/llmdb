@@ -46,6 +46,31 @@ func parseClientFeatures(header string) map[string]string {
 	return features
 }
 
+// parseMetadataLevel parses the Accept header to extract metadata level
+// Supports: application/json;metadata=minimal|full|none
+// Returns "minimal" as default if not specified
+func parseMetadataLevel(acceptHeader string) string {
+	if acceptHeader == "" {
+		return "minimal"
+	}
+
+	// Parse Accept header for metadata parameter
+	parts := strings.Split(acceptHeader, ";")
+	for _, part := range parts[1:] { // Skip first part (media type)
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "metadata=") {
+			value := strings.TrimPrefix(part, "metadata=")
+			value = strings.Trim(value, " \"")
+			switch value {
+			case "full", "none", "minimal":
+				return value
+			}
+		}
+	}
+
+	return "minimal"
+}
+
 // API handles HTTP requests
 type API struct {
 	store    *DocumentStore
@@ -94,6 +119,7 @@ func (a *API) StoreDocument(w http.ResponseWriter, r *http.Request) {
 		ID:       req.ID,
 		Content:  req.Content,
 		Metadata: req.Metadata,
+		Tags:     req.Tags,
 	}
 
 	// Check if immediate (sync) embedding is requested
@@ -129,23 +155,38 @@ func (a *API) StoreDocument(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return minimal response by default
-	schema := r.URL.Query().Get("schema")
-	if schema != "full" {
-		w.Header().Set("X-Schema", "minimal")
+	// Determine response metadata level from Accept header
+	metadataLevel := parseMetadataLevel(r.Header.Get("Accept"))
+
+	// Set Content-Type with metadata level
+	w.Header().Set("Content-Type", fmt.Sprintf("application/json;metadata=%s", metadataLevel))
+
+	if metadataLevel == "none" {
+		// Return only ID
+		minimalResp := map[string]interface{}{
+			"id": doc.ID,
+		}
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(minimalResp)
+		return
+	}
+
+	if metadataLevel == "minimal" {
+		// Return minimal response
 		minimalResp := map[string]interface{}{
 			"id":          doc.ID,
 			"created_at":  doc.CreatedAt,
 			"updated_at":  doc.UpdatedAt,
 			"is_embedded": doc.IsEmbedded,
 		}
-		a.jsonResponse(w, http.StatusCreated, minimalResp)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(minimalResp)
 		return
 	}
 
 	// Full response
-	w.Header().Set("X-Schema", "full")
-	a.jsonResponse(w, http.StatusCreated, doc)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(doc)
 }
 
 // GetDocument retrieves a document by ID
@@ -217,7 +258,7 @@ func (a *API) SearchDocuments(w http.ResponseWriter, r *http.Request) {
 	switch req.Type {
 	case SearchTypeFullText, "":
 		// Default to full-text search
-		results, err = a.store.SearchFullText(dbName, tableName, req.Query, req.Limit)
+		results, err = a.store.SearchFullText(dbName, tableName, req.Query, req.Limit, req.Filters)
 		if err != nil {
 			a.errorResponse(w, http.StatusInternalServerError,
 				fmt.Sprintf("full-text search failed: %v", err))
@@ -236,7 +277,7 @@ func (a *API) SearchDocuments(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		results, err = a.store.SearchVector(dbName, tableName, queryVector, req.Limit)
+		results, err = a.store.SearchVector(dbName, tableName, queryVector, req.Limit, req.Filters)
 		if err != nil {
 			a.errorResponse(w, http.StatusInternalServerError,
 				fmt.Sprintf("vector search failed: %v", err))
@@ -320,9 +361,8 @@ func (a *API) ListDocuments(w http.ResponseWriter, r *http.Request) {
 	limit := 100 // default
 	offset := 0  // default
 
-	// Check schema parameter - "full" for complete documents, default is minimal
-	schema := r.URL.Query().Get("schema")
-	fullSchema := schema == "full"
+	// Determine response metadata level from Accept header
+	metadataLevel := parseMetadataLevel(r.Header.Get("Accept"))
 
 	documents, err := a.store.ListDocuments(dbName, tableName, limit, offset)
 	if err != nil {
@@ -331,8 +371,34 @@ func (a *API) ListDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return minimal response by default (just IDs and metadata)
-	if !fullSchema {
+	// Set Content-Type with metadata level
+	w.Header().Set("Content-Type", fmt.Sprintf("application/json;metadata=%s", metadataLevel))
+
+	// Handle metadata=none - return only IDs
+	if metadataLevel == "none" {
+		type NoneDoc struct {
+			ID string `json:"id"`
+		}
+
+		noneDocs := make([]NoneDoc, len(documents))
+		for i, doc := range documents {
+			noneDocs[i] = NoneDoc{
+				ID: doc.ID,
+			}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"documents": noneDocs,
+			"count":     len(noneDocs),
+			"limit":     limit,
+			"offset":    offset,
+		})
+		return
+	}
+
+	// Handle metadata=minimal - return IDs and basic metadata
+	if metadataLevel == "minimal" {
 		type MinimalDoc struct {
 			ID         string    `json:"id"`
 			CreatedAt  time.Time `json:"created_at"`
@@ -350,8 +416,8 @@ func (a *API) ListDocuments(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		w.Header().Set("X-Schema", "minimal")
-		a.jsonResponse(w, http.StatusOK, map[string]interface{}{
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"documents": minimalDocs,
 			"count":     len(minimalDocs),
 			"limit":     limit,
@@ -360,9 +426,9 @@ func (a *API) ListDocuments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Full schema - return complete documents
-	w.Header().Set("X-Schema", "full")
-	a.jsonResponse(w, http.StatusOK, map[string]interface{}{
+	// Full metadata - return complete documents
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"documents": documents,
 		"count":     len(documents),
 		"limit":     limit,

@@ -299,19 +299,22 @@ func dotProduct(a, b []float32) float64 {
 }
 
 // Update SearchVector in store to use actual vector similarity
-func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVector []float32, limit int, metric string) ([]SearchResult, error) {
+func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVector []float32, limit int, metric string, filters map[string]interface{}) ([]SearchResult, error) {
 	db, err := s.getDB(dbId)
 	if err != nil {
 		return nil, err
 	}
 
-	query := fmt.Sprintf(`
-		SELECT id, content, metadata, vector, created_at, updated_at, is_embedded
-		FROM "%s"
-		WHERE is_embedded = 1 AND vector IS NOT NULL
-	`, tableName)
+	// Build filter clause
+	filterClause, filterArgs := buildFilterClause(filters, "")
 
-	rows, err := db.Query(query)
+	query := fmt.Sprintf(`
+		SELECT id, content, metadata, tags, vector, created_at, updated_at, is_embedded
+		FROM "%s"
+		WHERE is_embedded = 1 AND vector IS NOT NULL%s
+	`, tableName, filterClause)
+
+	rows, err := db.Query(query, filterArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -321,10 +324,11 @@ func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVect
 	for rows.Next() {
 		var doc Document
 		var metadataJSON string
+		var tagsStr string
 		var vectorBytes []byte
 		var isEmbedded int
 
-		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &vectorBytes,
+		err := rows.Scan(&doc.ID, &doc.Content, &metadataJSON, &tagsStr, &vectorBytes,
 			&doc.CreatedAt, &doc.UpdatedAt, &isEmbedded)
 		if err != nil {
 			continue
@@ -336,6 +340,10 @@ func (s *DocumentStore) searchVectorSimilarity(dbId, tableName string, queryVect
 
 		if metadataJSON != "" {
 			_ = json.Unmarshal([]byte(metadataJSON), &doc.Metadata)
+		}
+
+		if tagsStr != "" {
+			doc.Tags = strings.Split(tagsStr, ",")
 		}
 
 		if len(vectorBytes) > 0 {
